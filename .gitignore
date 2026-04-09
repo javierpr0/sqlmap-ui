@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.*
+CLAUDE.local.md
+
+# Logs
+*.log
+
+# Lock files (keep pnpm-lock.yaml, ignore Cargo.lock for apps is optional but usually kept)
