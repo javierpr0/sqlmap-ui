@@ -144,13 +144,27 @@ rm -f "$TAURI_CONF.bak"
 
 echo -e "${GREEN}Updated versions in package.json and tauri.conf.json${NC}"
 
-# ── Commit version bump ──
+# ── Detect remote name ──
+
+REMOTE=$(git -C "$PROJECT_DIR" remote | head -1)
+if [ -z "$REMOTE" ]; then
+  echo -e "${RED}Error: no git remote configured${NC}"
+  exit 1
+fi
+BRANCH=$(git -C "$PROJECT_DIR" branch --show-current)
+echo "Remote: $REMOTE ($BRANCH)"
+
+# ── Commit version bump (only if there are changes) ──
 
 cd "$PROJECT_DIR"
 git add package.json src-tauri/tauri.conf.json
-git commit -m "chore: bump version to $VERSION"
 
-echo -e "${GREEN}Committed version bump${NC}"
+if git diff --cached --quiet; then
+  echo -e "${YELLOW}Version already at $VERSION, no commit needed${NC}"
+else
+  git commit -m "chore: bump version to $VERSION"
+  echo -e "${GREEN}Committed version bump${NC}"
+fi
 
 # ── Create tag ──
 
@@ -160,15 +174,15 @@ echo -e "${GREEN}Created tag v$VERSION${NC}"
 # ── Push ──
 
 echo ""
-read -p "Push to origin? (y/N) " -n 1 -r
+read -p "Push to $REMOTE? (y/N) " -n 1 -r
 echo ""
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-  git push origin master --tags
-  echo -e "${GREEN}Pushed to origin. GitHub Actions will build and create the release.${NC}"
+  git push "$REMOTE" "$BRANCH" --tags
+  echo -e "${GREEN}Pushed to $REMOTE. GitHub Actions will build and create the release.${NC}"
 else
   echo ""
   echo "To push manually:"
-  echo "  git push origin master --tags"
+  echo "  git push $REMOTE $BRANCH --tags"
 fi
 
 echo ""
