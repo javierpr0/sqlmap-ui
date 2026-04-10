@@ -28,6 +28,8 @@
     "shell:allow-stdin-write",
     "shell:allow-kill",
     "shell:allow-open",
-    "notification:default"
+    "notification:default",
+    "updater:default",
+    "sql:default"
   ]
 }

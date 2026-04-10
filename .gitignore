@@ -21,7 +21,12 @@ Thumbs.db
 # Environment
 .env
 .env.*
+
+# Claude / AI planning
+CLAUDE.md
 CLAUDE.local.md
+AGENTS.md
+docs/
 
 # Logs
 *.log

@@ -5,6 +5,8 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { check } from "@tauri-apps/plugin-updater";
+import Database from "@tauri-apps/plugin-sql";
 
 // ── Types ──────────────────────────────────────────────
 
@@ -47,9 +49,16 @@ interface ScanTab {
   output: TerminalLine[];
   isRunning: boolean;
   initializing: boolean;
-  viewMode: "output" | "command" | "requests";
+  viewMode: "output" | "command" | "requests" | "findings";
   startedAt?: number;
   finishedAt?: number;
+}
+
+interface Finding {
+  parameter: string;
+  type: string;
+  title: string;
+  payload: string;
 }
 
 interface HistoryEntry {
@@ -197,28 +206,77 @@ function parseRawRequest(raw: string): Partial<SqlmapConfig> {
   return result;
 }
 
-function loadHistory(): HistoryEntry[] {
+let db: Awaited<ReturnType<typeof Database.load>> | null = null;
+
+async function getDb() {
+  if (!db) db = await Database.load("sqlite:sqlmap-ui.db");
+  return db;
+}
+
+async function loadHistoryFromDb(): Promise<HistoryEntry[]> {
   try {
-    return JSON.parse(localStorage.getItem("sqlmap-history") || "[]");
+    const d = await getDb();
+    const rows = await d.select<Array<{ id: string; target_url: string; config: string; output: string; started_at: number; finished_at: number; exit_code: number | null }>>(
+      "SELECT * FROM scan_history ORDER BY started_at DESC LIMIT 50"
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      targetUrl: r.target_url,
+      config: JSON.parse(r.config),
+      output: JSON.parse(r.output),
+      startedAt: r.started_at,
+      finishedAt: r.finished_at,
+      exitCode: r.exit_code,
+    }));
   } catch {
     return [];
   }
 }
 
-function saveHistory(history: HistoryEntry[]) {
-  localStorage.setItem("sqlmap-history", JSON.stringify(history.slice(0, 50)));
+async function saveHistoryEntry(entry: HistoryEntry) {
+  try {
+    const d = await getDb();
+    await d.execute(
+      "INSERT OR REPLACE INTO scan_history (id, target_url, config, output, started_at, finished_at, exit_code) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [entry.id, entry.targetUrl, JSON.stringify(entry.config), JSON.stringify(entry.output), entry.startedAt, entry.finishedAt, entry.exitCode]
+    );
+  } catch { /* ignore */ }
 }
 
-function loadProfiles(): Profile[] {
+async function clearHistoryDb() {
   try {
-    return JSON.parse(localStorage.getItem("sqlmap-profiles") || "[]");
+    const d = await getDb();
+    await d.execute("DELETE FROM scan_history");
+  } catch { /* ignore */ }
+}
+
+async function loadProfilesFromDb(): Promise<Profile[]> {
+  try {
+    const d = await getDb();
+    const rows = await d.select<Array<{ name: string; config: string }>>(
+      "SELECT * FROM profiles ORDER BY name"
+    );
+    return rows.map((r) => ({ name: r.name, config: JSON.parse(r.config) }));
   } catch {
     return [];
   }
 }
 
-function saveProfiles(profiles: Profile[]) {
-  localStorage.setItem("sqlmap-profiles", JSON.stringify(profiles));
+async function saveProfileToDb(profile: Profile) {
+  try {
+    const d = await getDb();
+    await d.execute(
+      "INSERT OR REPLACE INTO profiles (name, config) VALUES (?, ?)",
+      [profile.name, JSON.stringify(profile.config)]
+    );
+  } catch { /* ignore */ }
+}
+
+async function deleteProfileFromDb(name: string) {
+  try {
+    const d = await getDb();
+    await d.execute("DELETE FROM profiles WHERE name = ?", [name]);
+  } catch { /* ignore */ }
 }
 
 function exportReportHTML(entry: HistoryEntry | ScanTab): string {
@@ -287,6 +345,16 @@ export default function App() {
   const terminalRef = useRef<HTMLDivElement>(null);
   const childRefs = useRef<Map<string, ChildProcess>>(new Map());
 
+  // Theme
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    return (localStorage.getItem("sqlmap-theme") as "dark" | "light") || "dark";
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("sqlmap-theme", theme);
+  }, [theme]);
+
   // Search
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -298,9 +366,9 @@ export default function App() {
   const [showImport, setShowImport] = useState(false);
   const [showBatch, setShowBatch] = useState(false);
 
-  // History & Profiles
-  const [history, setHistory] = useState<HistoryEntry[]>(loadHistory);
-  const [profiles, setProfiles] = useState<Profile[]>(loadProfiles);
+  // History & Profiles (loaded from SQLite)
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [profiles, setProfiles] = useState<Profile[]>([]);
   const [profileName, setProfileName] = useState("");
 
   // Import
@@ -314,24 +382,105 @@ export default function App() {
   const [panelWidth, setPanelWidth] = useState(360);
   const resizing = useRef(false);
 
+  const [updateAvailable, setUpdateAvailable] = useState<string | null>(null);
+
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
 
-  // Keyboard shortcut: Ctrl+F
+  // Check for updates on startup
+  useEffect(() => {
+    check().then((update) => {
+      if (update) setUpdateAvailable(update.version);
+    }).catch(() => {});
+  }, []);
+
+  // Load data from SQLite on startup
+  useEffect(() => {
+    loadHistoryFromDb().then(setHistory);
+    loadProfilesFromDb().then(setProfiles);
+  }, []);
+
+  // Keyboard shortcuts
+  const runRef = useRef(runSqlmap);
+  const stopRef = useRef(stopSqlmap);
+  runRef.current = runSqlmap;
+  stopRef.current = stopSqlmap;
+
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+      const mod = e.metaKey || e.ctrlKey;
+
+      // Cmd+F: Search
+      if (mod && e.key === "f") {
         e.preventDefault();
         setSearchOpen((prev) => !prev);
         setTimeout(() => searchInputRef.current?.focus(), 50);
+        return;
       }
+      // Cmd+R: Run scan
+      if (mod && e.key === "r") {
+        e.preventDefault();
+        runRef.current();
+        return;
+      }
+      // Cmd+.: Stop scan
+      if (mod && e.key === ".") {
+        e.preventDefault();
+        stopRef.current();
+        return;
+      }
+      // Cmd+T: New tab
+      if (mod && e.key === "t") {
+        e.preventDefault();
+        addTab();
+        return;
+      }
+      // Cmd+W: Close tab
+      if (mod && e.key === "w") {
+        e.preventDefault();
+        setTabs((prev) => {
+          if (prev.length <= 1) return prev;
+          return prev; // handled below
+        });
+        closeTab(activeTabId);
+        return;
+      }
+      // Escape: close search/modals
       if (e.key === "Escape") {
         setSearchOpen(false);
         setSearchQuery("");
+        setShowHistory(false);
+        setShowProfiles(false);
+        setShowImport(false);
+        setShowBatch(false);
       }
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [activeTabId]);
+
+  // Drag & drop files
+  const [dragOver, setDragOver] = useState(false);
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length === 0) return;
+
+    const file = files[0];
+    const reader = new FileReader();
+    reader.onload = () => {
+      const content = reader.result as string;
+      if (file.name.endsWith(".txt")) {
+        setBatchUrls(content);
+        setShowBatch(true);
+      } else {
+        setRawRequest(content);
+        setShowImport(true);
+      }
+    };
+    reader.readAsText(file);
+  }
 
   const scrollToBottom = useCallback(() => {
     if (terminalRef.current) {
@@ -363,6 +512,43 @@ export default function App() {
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
   }, [panelWidth]);
+
+  // Parse findings from output
+  const findings = useMemo((): Finding[] => {
+    const result: Finding[] = [];
+    let currentParam = "";
+    let currentType = "";
+    let currentTitle = "";
+
+    for (const line of activeTab.output) {
+      const paramMatch = line.text.match(/Parameter:\s+(.+)/);
+      if (paramMatch) { currentParam = paramMatch[1].trim(); continue; }
+
+      const typeMatch = line.text.match(/^\s*Type:\s+(.+)/);
+      if (typeMatch) { currentType = typeMatch[1].trim(); continue; }
+
+      const titleMatch = line.text.match(/^\s*Title:\s+(.+)/);
+      if (titleMatch) { currentTitle = titleMatch[1].trim(); continue; }
+
+      const payloadMatch = line.text.match(/^\s*Payload:\s+(.+)/);
+      if (payloadMatch) {
+        result.push({
+          parameter: currentParam,
+          type: currentType,
+          title: currentTitle,
+          payload: payloadMatch[1].trim(),
+        });
+        continue;
+      }
+
+      // Detect DBMS info
+      const dbmsMatch = line.text.match(/back-end DBMS:\s+(.+)/);
+      if (dbmsMatch && !result.some((f) => f.type === "DBMS Detected")) {
+        result.push({ parameter: "-", type: "DBMS Detected", title: dbmsMatch[1].trim(), payload: "" });
+      }
+    }
+    return result;
+  }, [activeTab.output]);
 
   // Filtered output for search
   const filteredOutput = useMemo(() => {
@@ -536,7 +722,7 @@ export default function App() {
           };
           const updatedHistory = [entry, ...history].slice(0, 50);
           setHistory(updatedHistory);
-          saveHistory(updatedHistory);
+          saveHistoryEntry(entry);
           return newTab;
         });
         childRefs.current.delete(tabId);
@@ -593,7 +779,7 @@ export default function App() {
     const newProfile: Profile = { name: profileName.trim(), config: { ...activeTab.config, flags: { ...activeTab.config.flags } } };
     const updated = [...profiles.filter((p) => p.name !== newProfile.name), newProfile];
     setProfiles(updated);
-    saveProfiles(updated);
+    saveProfileToDb(newProfile);
     setProfileName("");
     setShowProfiles(false);
   }
@@ -609,12 +795,78 @@ export default function App() {
   function deleteProfile(name: string) {
     const updated = profiles.filter((p) => p.name !== name);
     setProfiles(updated);
-    saveProfiles(updated);
+    deleteProfileFromDb(name);
   }
 
-  // Import raw request
+  // Import raw request or Burp XML
   function applyImport() {
-    const parsed = parseRawRequest(rawRequest);
+    const trimmed = rawRequest.trim();
+
+    // Detect Burp Suite XML format
+    if (trimmed.startsWith("<?xml") || trimmed.startsWith("<items")) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(trimmed, "text/xml");
+      const items = doc.querySelectorAll("item");
+
+      if (items.length > 0) {
+        const urls: string[] = [];
+        items.forEach((item) => {
+          const url = item.querySelector("url")?.textContent;
+          if (url) urls.push(url);
+
+          // Apply first item's details to current tab
+          if (urls.length === 1) {
+            const method = item.querySelector("method")?.textContent || "GET";
+            const host = item.querySelector("host")?.textContent || "";
+            const path = item.querySelector("path")?.textContent || "";
+            const requestB64 = item.querySelector("request")?.textContent || "";
+
+            let cookie = "";
+            let headers = "";
+            let data = "";
+
+            // Try to decode base64 request
+            if (requestB64) {
+              try {
+                const decoded = item.querySelector("request")?.getAttribute("base64") === "true"
+                  ? atob(requestB64)
+                  : requestB64;
+                const parsed = parseRawRequest(decoded);
+                cookie = parsed.cookie || "";
+                headers = parsed.headers || "";
+                data = parsed.data || "";
+              } catch { /* ignore decode errors */ }
+            }
+
+            updateTab(activeTabId, (t) => ({
+              ...t,
+              config: {
+                ...t.config,
+                targetUrl: url || `https://${host}${path}`,
+                method,
+                cookie,
+                headers,
+                data,
+                flags: { ...t.config.flags },
+              },
+            }));
+          }
+        });
+
+        // If multiple items, open batch scan
+        if (urls.length > 1) {
+          setBatchUrls(urls.join("\n"));
+          setShowBatch(true);
+        }
+
+        setRawRequest("");
+        setShowImport(false);
+        return;
+      }
+    }
+
+    // Standard raw request
+    const parsed = parseRawRequest(trimmed);
     updateTab(activeTabId, (t) => ({
       ...t,
       config: {
@@ -625,6 +877,30 @@ export default function App() {
     }));
     setRawRequest("");
     setShowImport(false);
+  }
+
+  function exportBurpXml() {
+    const items = findings.map((f) =>
+      `  <issue>
+    <type>SQL Injection</type>
+    <parameter>${f.parameter.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</parameter>
+    <technique>${f.type.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</technique>
+    <title>${f.title.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</title>
+    <payload>${f.payload.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</payload>
+    <severity>High</severity>
+    <confidence>Certain</confidence>
+    <url>${activeTab.config.targetUrl.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</url>
+  </issue>`
+    ).join("\n");
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<issues>\n${items}\n</issues>`;
+    const blob = new Blob([xml], { type: "text/xml" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `sqlmap-findings-${Date.now()}.xml`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   // History
@@ -639,7 +915,7 @@ export default function App() {
 
   function clearHistory() {
     setHistory([]);
-    saveHistory([]);
+    clearHistoryDb();
   }
 
   // Export
@@ -706,9 +982,14 @@ export default function App() {
   const displayOutput = activeTab.viewMode === "requests" ? httpRequests : filteredOutput;
 
   return (
-    <div className="app">
+    <div
+      className={`app ${dragOver ? "drag-over" : ""}`}
+      onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={handleDrop}
+    >
       <header className="header">
-        <h1>SQLMap UI <span>v2.0</span></h1>
+        <h1>SQLMap UI <span>v2.0</span>{updateAvailable && <span className="update-badge">v{updateAvailable} available</span>}</h1>
         <div className="header-actions">
           <button className="header-btn" onClick={() => setShowHistory(!showHistory)} title="History">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
@@ -729,6 +1010,13 @@ export default function App() {
             title="Export Report"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+          </button>
+          <button className="header-btn" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} title={theme === "dark" ? "Light mode" : "Dark mode"}>
+            {theme === "dark" ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+            )}
           </button>
         </div>
         <div className="header-status">
@@ -817,7 +1105,7 @@ export default function App() {
               <button className="modal-close" onClick={() => setShowImport(false)}>x</button>
             </div>
             <div className="modal-body">
-              <p className="modal-hint">Paste a raw HTTP request from Burp Suite, DevTools, or similar:</p>
+              <p className="modal-hint">Paste a raw HTTP request or Burp Suite XML. Supports raw requests from DevTools, .req files, and Burp XML exports:</p>
               <textarea
                 className="import-textarea"
                 placeholder={`GET /page?id=1 HTTP/1.1\nHost: target.com\nCookie: session=abc123\n\n`}
@@ -1016,6 +1304,9 @@ export default function App() {
               <button className={`terminal-tab ${activeTab.viewMode === "requests" ? "active" : ""}`} onClick={() => setViewMode("requests")}>
                 Requests ({httpRequests.length})
               </button>
+              <button className={`terminal-tab ${activeTab.viewMode === "findings" ? "active" : ""} ${findings.length > 0 ? "has-findings" : ""}`} onClick={() => setViewMode("findings")}>
+                Findings ({findings.length})
+              </button>
             </div>
             <div className="terminal-meta">
               <span>{activeTab.viewMode === "output" ? (searchQuery ? `${filteredOutput.length}/` : "") + `${activeTab.output.length} lines` : ""}</span>
@@ -1043,7 +1334,29 @@ export default function App() {
           )}
 
           <div className="terminal-body" ref={terminalRef}>
-            {activeTab.viewMode === "command" ? (
+            {activeTab.viewMode === "findings" ? (
+              findings.length === 0 ? (
+                <div className="terminal-empty">No vulnerabilities found yet. Run a scan to detect SQL injections.</div>
+              ) : (
+                <div className="findings-list">
+                  <div className="findings-toolbar">
+                    <span className="findings-count">{findings.length} finding{findings.length !== 1 ? "s" : ""}</span>
+                    <button className="btn btn-secondary btn-sm" onClick={exportBurpXml}>Export XML</button>
+                  </div>
+                  {findings.map((f, i) => (
+                    <div key={i} className={`finding-card ${f.type === "DBMS Detected" ? "finding-info" : "finding-vuln"}`}>
+                      <div className="finding-header">
+                        <span className="finding-badge">{f.type === "DBMS Detected" ? "INFO" : "VULN"}</span>
+                        <span className="finding-param">{f.parameter}</span>
+                      </div>
+                      <div className="finding-type">{f.type}</div>
+                      {f.title && <div className="finding-title">{f.title}</div>}
+                      {f.payload && <div className="finding-payload"><code>{f.payload}</code></div>}
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : activeTab.viewMode === "command" ? (
               <div className="terminal-line cmd">{getCommandString()}</div>
             ) : displayOutput.length === 0 ? (
               <div className="terminal-empty">
@@ -1061,6 +1374,27 @@ export default function App() {
               ))
             )}
           </div>
+          {activeTab.isRunning && (
+            <form className="stdin-bar" onSubmit={(e) => {
+              e.preventDefault();
+              const input = (e.target as HTMLFormElement).elements.namedItem("stdinInput") as HTMLInputElement;
+              const value = input.value;
+              if (!value && value !== "") return;
+              const child = childRefs.current.get(activeTabId);
+              if (child) {
+                child.write(value + "\n");
+                updateTab(activeTabId, (t) => ({
+                  ...t,
+                  output: [...t.output, { text: `> ${value}`, type: "cmd" }],
+                }));
+              }
+              input.value = "";
+            }}>
+              <span className="stdin-prompt">&gt;</span>
+              <input name="stdinInput" type="text" className="stdin-input" placeholder="Type response to sqlmap prompt..." autoFocus />
+              <button type="submit" className="stdin-send">Send</button>
+            </form>
+          )}
         </div>
       </div>
     </div>
