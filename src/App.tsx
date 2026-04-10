@@ -608,7 +608,7 @@ export default function App() {
   }
 
   function buildArgs(config: SqlmapConfig): string[] {
-    const args: string[] = [];
+    const args: string[] = ["--disable-coloring"];
     if (config.targetUrl) args.push("-u", config.targetUrl);
     if (config.data) args.push("--data", config.data);
     if (config.cookie) args.push("--cookie", config.cookie);
