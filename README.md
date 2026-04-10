@@ -1,101 +1,137 @@
 # SQLMap UI
 
-Desktop application built with [Tauri](https://tauri.app/) that provides a graphical interface for [sqlmap](https://sqlmap.org/), the automatic SQL injection and database takeover tool.
+A fully self-contained desktop application for [sqlmap](https://sqlmap.org/) — the automatic SQL injection and database takeover tool. Built with [Tauri](https://tauri.app/), React, and Rust.
 
-## Screenshots
-
-The app features a dark theme with a configuration panel on the left and a real-time terminal output on the right. Multiple scans can run simultaneously in separate tabs.
+**No Python installation required.** The app bundles sqlmap + Python as a standalone sidecar binary via PyInstaller.
 
 ## Features
 
-- Full sqlmap configuration through a visual interface (target URL, POST data, cookies, detection level/risk, DBMS selection, techniques, tamper scripts, and more)
-- Real-time terminal output with color-coded lines (stdout, stderr, info, errors)
-- Multi-tab support: run multiple scans simultaneously, each with independent configuration and output
-- Command preview: see the exact sqlmap command before executing
-- Start/stop scan controls
-- Tab labels auto-update to show the target hostname
-- Native macOS application (~10MB)
+### Core
+- Full sqlmap configuration: URL, method, POST data, cookies, custom headers, level, risk, threads, DBMS, techniques, tamper scripts, extra arguments
+- Real-time terminal output with smart syntax coloring (`[CRITICAL]`, `[WARNING]`, `[INFO]`, `injectable`, `Parameter`)
+- Multi-tab: run multiple scans simultaneously with independent config and output per tab
+- Interactive stdin: respond to sqlmap prompts (Y/n, etc.) directly in the UI
+- Command preview tab
 
-## Requirements
+### Findings & Reporting
+- **Findings panel**: auto-parses vulnerabilities from output — shows parameter, injection type, title, and payload in structured cards
+- **Export HTML report**: download a styled report with config and color-coded output
+- **Export Burp XML**: export findings as Burp Suite-compatible XML
 
-- **Python 3** (for sqlmap)
-- **Rust** (for building the Tauri backend)
-- **Node.js** and **pnpm** (for building the frontend)
+### Productivity
+- **Search** (Cmd+F): filter output lines with live highlighting
+- **History**: last 50 scans stored in SQLite, click to re-open in a new tab
+- **Profiles**: save, load, and delete named configurations
+- **Batch scan**: paste multiple URLs to launch one tab per target
+- **Import requests**: paste raw HTTP requests from Burp Suite or DevTools — auto-parses URL, method, headers, cookies, body
+- **Burp XML import**: import Burp Suite XML exports directly
+- **Drag & drop**: drop `.txt` files to open batch scan, drop `.req`/`.http` files to import requests
+
+### UX
+- **Light / Dark theme** with toggle (persisted)
+- **Keyboard shortcuts**: Cmd+R (run), Cmd+. (stop), Cmd+T (new tab), Cmd+W (close tab), Cmd+F (search), Escape (close modals)
+- **Resizable panels**: drag the border between config and terminal (280px–600px)
+- **System notifications**: macOS notification when a scan completes
+- **Auto-update**: checks GitHub Releases for new versions on startup
+- **Custom icon**: SQL injection-themed app icon
+
+## Requirements (for building)
+
+- **Rust** 1.77+
+- **Node.js** 20+ and **pnpm** 10+
+- **Python 3** and **PyInstaller** (only for building the sidecar)
+
+> End users don't need any of these — the built `.app` / `.dmg` / `.msi` / `.deb` is fully self-contained.
 
 ## Project Structure
 
 ```
-tests/
-├── sqlmap/                  # sqlmap (cloned from github)
-│   ├── sqlmap.py            # Main sqlmap entry point
-│   └── run.py               # Wrapper that fixes MySQLdb import issues
-└── sqlmap-ui/               # Tauri desktop app
-    ├── src/                 # React frontend
-    │   ├── App.tsx          # Main component with multi-tab scan UI
-    │   ├── styles.css       # Dark theme styles
-    │   ├── main.tsx         # React entry point
-    │   └── vite-env.d.ts    # Vite type declarations
-    ├── src-tauri/           # Rust backend
-    │   ├── src/lib.rs       # Tauri commands (sqlmap path resolution)
-    │   ├── src/main.rs      # App entry point
-    │   ├── Cargo.toml       # Rust dependencies
-    │   ├── tauri.conf.json  # Tauri configuration
-    │   └── capabilities/    # Shell permissions for spawning python3
-    ├── index.html           # HTML entry point
-    ├── vite.config.ts       # Vite configuration
-    ├── tsconfig.json        # TypeScript configuration
-    └── package.json         # Node dependencies and scripts
+sqlmap-ui/
+├── src/                         # React frontend
+│   ├── App.tsx                  # Main component (~1100 lines)
+│   ├── styles.css               # Full dark + light theme
+│   ├── main.tsx                 # React entry point
+│   └── vite-env.d.ts
+├── src-tauri/                   # Rust backend
+│   ├── src/lib.rs               # Plugin setup, SQLite migrations
+│   ├── Cargo.toml               # Rust dependencies
+│   ├── tauri.conf.json          # App config, plugins, sidecar
+│   ├── capabilities/            # Shell, notification, SQL, updater permissions
+│   ├── binaries/                # sqlmap sidecar (PyInstaller binary)
+│   └── icons/                   # Custom app icons (all platforms)
+├── scripts/
+│   └── build-sidecar.sh         # Build sidecar for current platform
+├── .github/workflows/
+│   └── build.yml                # CI: multi-platform builds
+├── app-icon.png                 # Source icon (1024x1024)
+├── index.html
+├── vite.config.ts
+├── tsconfig.json
+└── package.json
 ```
 
-## Setup
+## Quick Start
 
 ```bash
-# 1. Clone sqlmap (if not already done)
-git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git sqlmap
-
-# 2. Install frontend dependencies
+# Clone the repo
+git clone <repo-url> sqlmap-ui
 cd sqlmap-ui
+
+# Install dependencies
 pnpm install
-```
 
-## Development
+# Build the sidecar (requires Python 3 + PyInstaller + sqlmap cloned nearby)
+git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git ../sqlmap
+pip install pyinstaller
+bash scripts/build-sidecar.sh
 
-```bash
-cd sqlmap-ui
+# Run in development
 pnpm tauri dev
-```
 
-This starts the Vite dev server on port 1420 with HMR and launches the Tauri window.
-
-## Build
-
-```bash
-cd sqlmap-ui
+# Build for production
 pnpm tauri build
 ```
 
-Build artifacts:
-- **macOS app**: `src-tauri/target/release/bundle/macos/SQLMap UI.app`
-- **DMG installer**: `src-tauri/target/release/bundle/dmg/SQLMap UI_0.1.0_aarch64.dmg`
+## Build Output
+
+| Platform | Artifact | Size |
+|----------|----------|------|
+| macOS (arm64) | `SQLMap UI.app` | ~41 MB |
+| macOS (arm64) | `SQLMap UI_x.x.x_aarch64.dmg` | ~34 MB |
+| Linux | `.deb`, `.AppImage` | ~35 MB |
+| Windows | `.msi`, `.exe` | ~35 MB |
 
 ## How It Works
 
-1. **Path resolution**: The Rust backend (`lib.rs`) locates `sqlmap/run.py` by searching relative to the executable in multiple candidate paths (dev, release bundle, sibling directory), with a hardcoded fallback.
+1. **Sidecar binary**: sqlmap + Python 3.10 are compiled into a single standalone binary (~30 MB) using PyInstaller. Tauri bundles it inside the `.app` as an `externalBin`.
 
-2. **Python wrapper**: `sqlmap/run.py` patches a broken `MySQLdb` import before delegating to the real `sqlmap.py`. This avoids crashes when `mysqlclient` is installed but its native library (`libmysqlclient`) is missing.
+2. **Shell execution**: The React frontend uses `Command.sidecar()` from `@tauri-apps/plugin-shell` to spawn the sidecar. stdout/stderr are streamed to the terminal in real time. stdin is writable for interactive prompts.
 
-3. **Shell execution**: The frontend uses Tauri's `@tauri-apps/plugin-shell` to spawn `python3` as a subprocess. stdout/stderr are streamed to the terminal in real time.
+3. **Persistence**: Scan history and profiles are stored in a SQLite database (`sqlmap-ui.db`) via `@tauri-apps/plugin-sql` with automatic schema migrations.
 
-4. **Multi-tab**: Each tab maintains its own state (config, output, running status, child process reference). Tabs can be created, switched, and closed independently.
+4. **Multi-tab architecture**: Each `ScanTab` holds its own config, output, child process reference, and view mode. Tabs are fully independent — you can run 5 scans against different targets simultaneously.
 
 ## Tech Stack
 
-| Layer    | Technology                          |
-|----------|-------------------------------------|
-| Frontend | React 19, TypeScript 6, Vite 8      |
-| Backend  | Rust, Tauri 2.10                     |
-| Tool     | sqlmap 1.10.x (Python 3)            |
-| Package  | pnpm 10                             |
+| Layer       | Technology                                    |
+|-------------|-----------------------------------------------|
+| Frontend    | React 19, TypeScript, Vite 8                  |
+| Backend     | Rust, Tauri 2.10                               |
+| Database    | SQLite (via tauri-plugin-sql)                  |
+| Sidecar     | sqlmap 1.10 + Python 3.10 (PyInstaller)        |
+| CI/CD       | GitHub Actions (macOS, Linux, Windows)          |
+| Package     | pnpm 10                                        |
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Cmd+R` | Run scan |
+| `Cmd+.` | Stop scan |
+| `Cmd+T` | New tab |
+| `Cmd+W` | Close tab |
+| `Cmd+F` | Search output |
+| `Escape` | Close modals / search |
 
 ## License
 
